@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Odin Trade Ledger (Weav3r Receipt + Pricelist)
-// @version      1.0.0
+// @version      1.0.1
 // @downloadURL  https://github.com/bjornodinsson89/Odin-Trade-Ledger/raw/main/OdinTradeLedger.user.js
 // @updateURL    https://github.com/bjornodinsson89/Odin-Trade-Ledger/raw/main/OdinTradeLedger.meta.js
 // @author       BjornOdinsson89
@@ -625,12 +625,16 @@ async function weaverGetPriceList(userId, opts = {}) {
       const meta = itemsIndex?.idToMeta?.[itemId];
       const name = raw?.name || meta?.name || `Item ${itemId}`;
       const buyPrice = Number(raw?.buyPrice ?? raw?.fixedPrice ?? raw?.price ?? 0) || 0;
+      const bulkThreshold = raw?.bulkThreshold ?? raw?.bulk_threshold ?? raw?.bulkQty ?? raw?.bulk_qty ?? null;
+      const bulkBuyPrice = raw?.bulkBuyPrice ?? raw?.bulk_buy_price ?? raw?.bulkPrice ?? raw?.bulk_price ?? null;
       const marketValue = Number(raw?.market_value ?? raw?.marketValue ?? raw?.market ?? raw?.avg_market ?? raw?.market_price ?? raw?.marketPrice ?? 0) || 0;
 
       out.push({
         itemId,
         name: String(name),
         buyPrice,
+        bulkThreshold: (bulkThreshold == null ? null : Number(bulkThreshold)),
+        bulkBuyPrice: (bulkBuyPrice == null ? null : Number(bulkBuyPrice)),
         marketValue,
       });
     }
@@ -907,6 +911,8 @@ async function weaverGetPriceList(userId, opts = {}) {
       .tth-btn:active{transform:translateY(1px);filter:brightness(1.1);}
       .tth-btn.primary{background:linear-gradient(180deg,#3d7f3d 0%, #275127 100%);border-color:rgba(111,226,111,.35);color:#eaffea;}
       .tth-btn.danger{background:#ef4444;border-color:#dc2626;color:#fff;}
+      .tth-btn.square{width:44px;min-width:44px;padding:6px 0;}
+      .tth-btn.fee-active{box-shadow:0 0 0 1px rgba(21,211,154,.55), 0 0 12px rgba(21,211,154,.45);border-color:rgba(21,211,154,.75);}
       .tth-input, .tth-select{background:rgba(0,0,0,.35);border:1px solid rgba(127,183,255,.22);color:#fff;padding:10px;border-radius:10px;outline:none;}
       .tth-input:focus,.tth-select:focus{border-color:#7fb7ff;}
 
@@ -1057,6 +1063,9 @@ drawer.addEventListener("pointerleave", _clearPress, { capture: true, passive: t
 
       profitMode: String(GM_getValue(STORE.profitMode, "market") || "market").toLowerCase() === "bazaar" ? "bazaar" : "market",
 
+      // Apply the 5% item market fee to profit calcs when enabled (display-only).
+      marketFeeCut: false,
+
       pricelistRaw: [],
       pricelist: [],
       pricelistMap: new Map(),
@@ -1141,7 +1150,9 @@ working: false,
           writeBazaarCache(itemId, data);
           updateMarketplaceInDom(itemId);
         }
-      }).catch(() => {}).finally(() => {
+      }).catch((e) => {
+        console.error("[Odin Ledger] Error:", e);
+      }).finally(() => {
         bazaarInflight.delete(itemId);
       });
 
@@ -1157,6 +1168,7 @@ working: false,
       actions.innerHTML = `
         <button class="tth-btn primary" id="btn-complete-trade" style="flex:2">Complete Trade</button>
         <button class="tth-btn" id="btn-refresh-pricelist" style="flex:1">Refresh Pricelist</button>
+        <button class="tth-btn square" id="btn-market-fee" title="Apply 5% item market fee to profit">-5% Fee</button>
         <button class="tth-btn" id="btn-profit-mode" style="flex:1"></button>
       `;
       body.appendChild(actions);
@@ -1222,7 +1234,18 @@ working: false,
         const marketPrice = (Number.isFinite(marketRaw) && marketRaw > 1) ? marketRaw : 0;
 
         const plEntry = itemId ? state.pricelistMap.get(Number(itemId)) : null;
-        const weaverBuy = plEntry ? Number(plEntry.buyPrice) : 0;
+
+        // Weav3r supports bulk pricing: if qty >= bulkThreshold, prefer bulkBuyPrice.
+        let weaverBuy = plEntry ? Number(plEntry.buyPrice) : 0;
+        const bulkThreshold = plEntry ? Number(plEntry.bulkThreshold) : NaN;
+        const bulkBuyPrice = plEntry ? Number(plEntry.bulkBuyPrice) : NaN;
+        if (
+          Number.isFinite(bulkThreshold) && bulkThreshold > 0 &&
+          Number.isFinite(bulkBuyPrice) && bulkBuyPrice > 0 &&
+          Number(qty) >= bulkThreshold
+        ) {
+          weaverBuy = bulkBuyPrice;
+        }
         let buyEa = 0;
         if (Number.isFinite(weaverBuy) && weaverBuy > 0) {
           buyEa = Math.round(weaverBuy);
@@ -1235,9 +1258,14 @@ working: false,
         if (buyTotal > 0) totalBuyAll += buyTotal;
 
         const _profitMode = state.profitMode === "bazaar" ? "bazaar" : "market";
-        const profitBase = _profitMode === "bazaar"
+        let profitBase = _profitMode === "bazaar"
           ? (bazaarLowest || 0)
           : ((marketPrice > 1) ? marketPrice : 0);
+
+        // Optional: account for item market's 5% selling fee by reducing the market profit base.
+        if (_profitMode === "market" && state.marketFeeCut && profitBase > 0) {
+          profitBase = profitBase * 0.95;
+        }
         const profitTotal = (profitBase > 0 && buyEa > 0) ? ((profitBase - buyEa) * qty) : 0;
         const profColor = profitTotal >= 0 ? "#15d39a" : "#ff5a5a";
         const profTxt = (profitBase > 0 && buyEa > 0) ? money(profitTotal) : "—";
@@ -1292,6 +1320,15 @@ working: false,
         _profitBtn.onclick = () => {
           state.profitMode = state.profitMode === "bazaar" ? "market" : "bazaar";
           GM_setValue(STORE.profitMode, state.profitMode);
+          scheduleRender();
+        };
+      }
+
+      const _feeBtn = actions.querySelector("#btn-market-fee");
+      if (_feeBtn) {
+        _feeBtn.classList.toggle("fee-active", !!state.marketFeeCut);
+        _feeBtn.onclick = () => {
+          state.marketFeeCut = !state.marketFeeCut;
           scheduleRender();
         };
       }
@@ -1426,7 +1463,9 @@ working: false,
               drawer.state.bazaarData[id] = data;
               writeBazaarCache(id, data);
             }
-          }).catch(() => {}).finally(() => {
+          }).catch((e) => {
+            console.error("[Odin Ledger] Error:", e);
+          }).finally(() => {
             bazaarInflight.delete(id);
           });
 
@@ -1436,11 +1475,14 @@ working: false,
       }
 
       if (tasks.length) {
-        Promise.all(tasks).then(() => drawer.scheduleRender()).catch(() => {});
+        Promise.all(tasks)
+          .then(() => drawer.scheduleRender())
+          .catch((e) => console.error("[Odin Ledger] Error:", e));
       } else {
         drawer.scheduleRender();
       }
     } catch (_) {
+      console.error("[Odin Ledger] Error:", _);
       drawer.scheduleRender();
     }
   }
