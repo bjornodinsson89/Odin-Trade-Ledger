@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Odin Trade Ledger (Weav3r Receipt + Pricelist)
-// @version      1.0.0
+// @version      1.0.1
 // @author       BjornOdinsson89
 // @description  Trade drawer: reads trade log, shows market/lowest bazaar/buy/profit, caches your Weav3r pricelist + receipt.
 // @icon         https://i.postimg.cc/BQ6bSYKM/file-000000004bb071f5a96fc52564bf26ad-(1).png
